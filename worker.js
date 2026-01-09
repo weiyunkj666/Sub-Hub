@@ -15,6 +15,19 @@ const NODE_TYPES = {
   SNELL: 'snell,'
 };
 
+// 订阅转换器后端列表
+const CONVERTER_BACKENDS = [
+  { id: 'sub.xeton.dev', name: 'sub.xeton.dev', label: 'subconverter作者提供-稳定' },
+  { id: 'api.wcc.best', name: 'api.wcc.best', label: 'sub-web作者提供-稳定' },
+  { id: 'sub.id9.cc', name: 'sub.id9.cc', label: '品云提供' },
+  { id: 'api.v1.mk', name: 'api.v1.mk', label: '肥羊提供' },
+  { id: 'api.nexconvert.com', name: 'api.nexconvert.com', label: '奶昔提供' },
+  { id: 'api.dler.io', name: 'api.dler.io', label: 'lhie1提供' },
+  { id: 'sub.maoxiongnet.com', name: 'sub.maoxiongnet.com', label: '猫熊提供' },
+  { id: 'api.sublink.dev', name: 'api.sublink.dev', label: '歪兔提供' },
+  { id: 'sub.xjz.im', name: 'sub.xjz.im', label: '920.im提供' }
+];
+
 function extractNodeName(nodeLink) {
   if (!nodeLink) return '未命名节点';
   
@@ -57,9 +70,9 @@ export default {
       return new Response('Not Found', { status: 404 });
     }
 
-    const adminPath = env.ADMIN_PATH || 'admin';
-    const adminUsername = env.ADMIN_USERNAME || 'admin';
-    const adminPassword = env.ADMIN_PASSWORD || 'password';
+    const adminPath = env.ADMIN_PATH || 'weiyunkj';
+    const adminUsername = env.ADMIN_USERNAME || 'weiyunkj';
+    const adminPassword = env.ADMIN_PASSWORD || 'Gundan520.';
     
     // 处理登录页面请求
     if (pathname === `/${adminPath}/login`) {
@@ -97,8 +110,13 @@ export default {
         });
       }
 
+      // 处理订阅排序API
+      if (pathname === `/${adminPath}/api/subscriptions/reorder` && method === 'POST') {
+        return handleReorderSubscriptions(request, env);
+      }
+
       // 处理节点管理API请求
-      const nodeApiMatch = pathname.match(new RegExp(`^/${adminPath}/api/subscriptions/([^/]+)/nodes(?:/([^/]+|reorder|batch|batch-delete))?$`));
+      const nodeApiMatch = pathname.match(new RegExp(`^/${adminPath}/api/subscriptions/([^/]+)/nodes(?:/([^/]+|reorder|batch|batch-delete|replace))?$`));
       if (nodeApiMatch) {
         const subscriptionPath = nodeApiMatch[1];
         const nodeId = nodeApiMatch[2];
@@ -110,6 +128,10 @@ export default {
           
           if (nodeId === 'batch-delete' && method === 'POST') {
             return handleBatchDeleteNodes(request, env, subscriptionPath);
+          }
+          
+          if (nodeId === 'replace' && method === 'POST') {
+            return handleReplaceNodes(request, env, subscriptionPath);
           }
           
           if (nodeId === 'reorder' && method === 'POST') {
@@ -166,15 +188,15 @@ export default {
             return handleCreateNode(request, env, subscriptionPath);
           }
           
-          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && method === 'PUT') {
+          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && nodeId !== 'replace' && method === 'PUT') {
             return handleUpdateNode(request, env, subscriptionPath, nodeId);
           }
           
-          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && method === 'DELETE') {
+          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && nodeId !== 'replace' && method === 'DELETE') {
             return handleDeleteNode(env, subscriptionPath, nodeId);
           }
           
-          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && method === 'PATCH') {
+          if (nodeId && nodeId !== 'reorder' && nodeId !== 'batch' && nodeId !== 'batch-delete' && nodeId !== 'replace' && method === 'PATCH') {
             return handleToggleNode(env, subscriptionPath, nodeId, request);
           }
           
@@ -225,9 +247,10 @@ export default {
               return createErrorResponse('该路径已被使用', 400);
             }
             
+            const now = Date.now();
             const result = await env.DB.prepare(
-              "INSERT INTO subscriptions (name, path) VALUES (?, ?)"
-            ).bind(name, path).run();
+              "INSERT INTO subscriptions (name, path, sub_order, updated_at, converter_backend) VALUES (?, ?, ?, ?, ?)"
+            ).bind(name, path, now, now, 'sub.xeton.dev').run();
 
             if (!result.success) {
               throw new Error('创建订阅失败');
@@ -336,8 +359,33 @@ export default {
   },
 };
 
-// 批量创建节点处理函数
-async function handleBatchCreateNodes(request, env, subscriptionPath) {
+// 处理订阅排序
+async function handleReorderSubscriptions(request, env) {
+  try {
+    const { orders } = await request.json();
+    
+    if (!Array.isArray(orders) || orders.length === 0) {
+      return createErrorResponse('无效的排序数据', 400);
+    }
+    
+    const statements = [];
+    for (const { path, order } of orders) {
+      statements.push(env.DB.prepare(
+        "UPDATE subscriptions SET sub_order = ? WHERE path = ?"
+      ).bind(order, path));
+    }
+    
+    await env.DB.batch(statements);
+    
+    return createSuccessResponse(null, '订阅顺序已更新');
+  } catch (error) {
+    console.error('更新订阅顺序失败:', error);
+    return createErrorResponse('更新订阅顺序失败: ' + error.message);
+  }
+}
+
+// 替换节点处理函数
+async function handleReplaceNodes(request, env, subscriptionPath) {
   try {
     const { nodes } = await request.json();
     
@@ -354,8 +402,20 @@ async function handleBatchCreateNodes(request, env, subscriptionPath) {
     }
     
     const subscriptionId = subResults[0].id;
+    const now = Date.now();
+    
+    // 先删除所有旧节点
+    await env.DB.prepare(
+      "DELETE FROM nodes WHERE subscription_id = ?"
+    ).bind(subscriptionId).run();
+    
+    // 更新订阅的更新时间
+    await env.DB.prepare(
+      "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+    ).bind(now, subscriptionId).run();
+    
+    // 添加新节点
     const statements = [];
-    const timestamp = Date.now();
     
     for (let i = 0; i < nodes.length; i++) {
       const node = nodes[i];
@@ -376,7 +436,7 @@ async function handleBatchCreateNodes(request, env, subscriptionPath) {
       }
       
       const nodeName = node.name || extractNodeName(originalLink);
-      const nodeOrder = node.order !== undefined ? node.order : (timestamp + i);
+      const nodeOrder = node.order !== undefined ? node.order : (now + i);
       
       statements.push(
         env.DB.prepare(
@@ -391,7 +451,74 @@ async function handleBatchCreateNodes(request, env, subscriptionPath) {
     
     await env.DB.batch(statements);
     
-    return createSuccessResponse({ count: statements.length }, `成功添加 ${statements.length} 个节点`);
+    return createSuccessResponse({ count: statements.length }, `成功替换为 ${statements.length} 个节点`);
+  } catch (error) {
+    console.error('替换节点失败:', error);
+    return createErrorResponse('替换节点失败: ' + error.message);
+  }
+}
+
+// 批量创建节点处理函数
+async function handleBatchCreateNodes(request, env, subscriptionPath) {
+  try {
+    const { nodes } = await request.json();
+    
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return createErrorResponse('无效的节点数据', 400);
+    }
+    
+    const { results: subResults } = await env.DB.prepare(
+      "SELECT id FROM subscriptions WHERE path = ?"
+    ).bind(subscriptionPath).all();
+    
+    if (!subResults?.length) {
+      return createErrorResponse('订阅不存在', 404);
+    }
+    
+    const subscriptionId = subResults[0].id;
+    const statements = [];
+    const now = Date.now();
+    
+    // 更新订阅的更新时间
+    statements.push(env.DB.prepare(
+      "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+    ).bind(now, subscriptionId));
+    
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      let originalLink = node.content.trim();
+      
+      try {
+        const decodedContent = safeBase64Decode(originalLink);
+        if (Object.values(NODE_TYPES).some(prefix => 
+          decodedContent.startsWith(prefix) && prefix !== NODE_TYPES.SNELL)) {
+          originalLink = decodedContent.trim();
+        }
+      } catch (e) {}
+      
+      const lowerContent = originalLink.toLowerCase();
+      const isSnell = lowerContent.includes('=') && lowerContent.includes('snell,');
+      if (!['ss://', 'vmess://', 'trojan://', 'vless://', 'socks://', 'hysteria2://', 'tuic://'].some(prefix => lowerContent.startsWith(prefix)) && !isSnell) {
+        continue;
+      }
+      
+      const nodeName = node.name || extractNodeName(originalLink);
+      const nodeOrder = node.order !== undefined ? node.order : (now + i);
+      
+      statements.push(
+        env.DB.prepare(
+          "INSERT INTO nodes (subscription_id, name, original_link, node_order, enabled) VALUES (?, ?, ?, ?, 1)"
+        ).bind(subscriptionId, nodeName, originalLink, nodeOrder)
+      );
+    }
+    
+    if (statements.length <= 1) {
+      return createErrorResponse('没有有效的节点可以添加', 400);
+    }
+    
+    await env.DB.batch(statements);
+    
+    return createSuccessResponse({ count: statements.length - 1 }, `成功添加 ${statements.length - 1} 个节点`);
   } catch (error) {
     console.error('批量创建节点失败:', error);
     return createErrorResponse('批量创建节点失败: ' + error.message);
@@ -417,6 +544,12 @@ async function handleBatchDeleteNodes(request, env, subscriptionPath) {
     
     const subscriptionId = subResults[0].id;
     const placeholders = nodeIds.map(() => '?').join(',');
+    const now = Date.now();
+    
+    // 更新订阅的更新时间
+    await env.DB.prepare(
+      "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+    ).bind(now, subscriptionId).run();
     
     const result = await env.DB.prepare(
       `DELETE FROM nodes WHERE id IN (${placeholders}) AND subscription_id = ?`
@@ -477,7 +610,21 @@ const SVG_ICONS = {
   alertCircle: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>`,
   loader: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="spin"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg>`,
   swap: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4"></path><path d="M20 7H4"></path><path d="M8 21l-4-4 4-4"></path><path d="M4 17h16"></path></svg>`,
-  externalLink: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`
+  externalLink: `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`,
+  sun: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`,
+  moon: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`,
+  qrcode: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="3" height="3"></rect><rect x="18" y="14" width="3" height="3"></rect><rect x="14" y="18" width="3" height="3"></rect><rect x="18" y="18" width="3" height="3"></rect></svg>`,
+  refresh: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>`,
+  copyAll: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path><line x1="12" y1="15" x2="18" y2="15"></line><line x1="12" y1="18" x2="18" y2="18"></line></svg>`,
+  download: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`,
+  chevronDown: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`,
+  clock: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`,
+  settings: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
+  search: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`,
+  filter: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon></svg>`,
+  layoutGrid: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>`,
+  layoutList: `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>`,
+  package: `<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="16.5" y1="9.4" x2="7.5" y2="4.21"></line><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>`
 };
 
 // 提供登录页面HTML
@@ -510,6 +657,16 @@ function serveLoginPage(adminPath) {
       --font-code: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
     }
 
+    [data-theme="light"] {
+      --bg-body: #f5f5f5;
+      --bg-card: #ffffff;
+      --bg-input: #f0f0f0;
+      --border-color: #e0e0e0;
+      --text-main: #1a1a1a;
+      --text-sub: #666666;
+      --text-dim: #999999;
+    }
+
     * {
       margin: 0;
       padding: 0;
@@ -525,6 +682,7 @@ function serveLoginPage(adminPath) {
       justify-content: center;
       padding: 20px;
       color: var(--text-main);
+      transition: background-color 0.3s, color 0.3s;
     }
 
     .login-container {
@@ -537,6 +695,7 @@ function serveLoginPage(adminPath) {
       border: 1px solid var(--border-color);
       border-radius: var(--radius);
       overflow: hidden;
+      transition: background-color 0.3s, border-color 0.3s;
     }
 
     .login-header {
@@ -609,7 +768,7 @@ function serveLoginPage(adminPath) {
       color: var(--text-main);
       font-size: 0.875rem;
       font-family: var(--font-code);
-      transition: border-color 0.2s, box-shadow 0.2s;
+      transition: border-color 0.2s, box-shadow 0.2s, background-color 0.3s;
     }
 
     .form-input:focus {
@@ -678,9 +837,35 @@ function serveLoginPage(adminPath) {
     .terminal-prompt span {
       color: var(--success);
     }
+
+    .theme-toggle {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 50%;
+      cursor: pointer;
+      transition: all 0.2s;
+      color: var(--text-main);
+    }
+
+    .theme-toggle:hover {
+      background: var(--bg-input);
+      transform: scale(1.05);
+    }
   </style>
 </head>
 <body>
+  <button class="theme-toggle" onclick="toggleTheme()" title="切换主题">
+    <span id="themeIcon">${SVG_ICONS.moon}</span>
+  </button>
+
   <div class="login-container">
     <div class="login-card">
       <div class="login-header">
@@ -726,6 +911,30 @@ function serveLoginPage(adminPath) {
   </div>
   
   <script>
+    const sunIcon = \`${SVG_ICONS.sun}\`;
+    const moonIcon = \`${SVG_ICONS.moon}\`;
+
+    function initTheme() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', savedTheme);
+      updateThemeIcon(savedTheme);
+    }
+
+    function toggleTheme() {
+      const currentTheme = document.documentElement.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      updateThemeIcon(newTheme);
+    }
+
+    function updateThemeIcon(theme) {
+      const iconEl = document.getElementById('themeIcon');
+      iconEl.innerHTML = theme === 'dark' ? moonIcon : sunIcon;
+    }
+
+    initTheme();
+
     document.getElementById('loginForm').addEventListener('submit', async function(e) {
       e.preventDefault();
       
@@ -833,6 +1042,7 @@ async function handleLogin(request, env, adminUsername, adminPassword, adminPath
   }), { headers });
 }
 
+
 // 处理登出请求
 async function handleLogout(request, env, adminPath) {
   const sessionId = getSessionFromCookie(request);
@@ -849,6 +1059,8 @@ async function handleLogout(request, env, adminPath) {
 
 // 管理面板HTML生成函数
 function serveAdminPanel(env, adminPath) {
+  const converterBackendsJson = JSON.stringify(CONVERTER_BACKENDS);
+  
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -881,13 +1093,23 @@ function serveAdminPanel(env, adminPath) {
       --font-code: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
     }
 
+    [data-theme="light"] {
+      --bg-body: #f5f5f5;
+      --bg-card: #ffffff;
+      --bg-input: #f0f0f0;
+      --bg-hover: #e8e8e8;
+      --border-color: #e0e0e0;
+      --text-main: #1a1a1a;
+      --text-sub: #666666;
+      --text-dim: #999999;
+    }
+
     * {
       margin: 0;
       padding: 0;
       box-sizing: border-box;
     }
 
-    /* 滚动条样式 */
     ::-webkit-scrollbar {
       width: 8px;
       height: 8px;
@@ -906,6 +1128,14 @@ function serveAdminPanel(env, adminPath) {
       background: #52525b;
     }
 
+    [data-theme="light"] ::-webkit-scrollbar-thumb {
+      background: #c0c0c0;
+    }
+
+    [data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+      background: #a0a0a0;
+    }
+
     body {
       font-family: var(--font-ui);
       background: var(--bg-body);
@@ -913,9 +1143,9 @@ function serveAdminPanel(env, adminPath) {
       min-height: 100vh;
       font-size: 13px;
       line-height: 1.5;
+      transition: background-color 0.3s, color 0.3s;
     }
 
-    /* 导航栏 */
     .navbar {
       background: var(--bg-card);
       border-bottom: 1px solid var(--border-color);
@@ -927,6 +1157,7 @@ function serveAdminPanel(env, adminPath) {
       position: sticky;
       top: 0;
       z-index: 100;
+      transition: background-color 0.3s, border-color 0.3s;
     }
 
     .navbar-brand {
@@ -956,6 +1187,74 @@ function serveAdminPanel(env, adminPath) {
       height: 18px;
     }
 
+    .navbar-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn-layout {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.25rem;
+      padding: 0 0.5rem;
+      height: 32px;
+      background: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 0.7rem;
+      font-family: var(--font-ui);
+      line-height: 1;
+    }
+    
+    .btn-layout svg {
+      vertical-align: middle;
+    }
+    
+    .btn-layout span {
+      display: inline-flex;
+      align-items: center;
+    }
+    
+    
+
+    .btn-theme {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      background: transparent;
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .btn-theme:hover {
+      background: var(--bg-hover);
+      color: var(--warning);
+      border-color: var(--warning);
+    }
+    
+
+    .btn-layout:hover {
+      background: var(--bg-hover);
+      color: var(--primary);
+      border-color: var(--primary);
+    }
+
+    .btn-layout.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: white;
+    }
+
     .btn-logout {
       display: flex;
       align-items: center;
@@ -978,19 +1277,19 @@ function serveAdminPanel(env, adminPath) {
       border-color: var(--danger);
     }
 
-    /* 容器 */
     .container {
       max-width: 1200px;
       margin: 0 auto;
       padding: 1.5rem;
     }
 
-    /* 页面头部 */
     .page-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
       margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      gap: 1rem;
     }
 
     .page-title {
@@ -1002,7 +1301,6 @@ function serveAdminPanel(env, adminPath) {
       font-family: var(--font-code);
     }
 
-    /* 按钮基础样式 */
     .btn {
       display: inline-flex;
       align-items: center;
@@ -1098,13 +1396,14 @@ function serveAdminPanel(env, adminPath) {
       cursor: not-allowed;
     }
 
-    /* 订阅卡片 */
+    /* 订阅卡片 - 宽松模式 */
     .subscription-card {
       background: var(--bg-card);
       border: 1px solid var(--border-color);
       border-radius: var(--radius);
       margin-bottom: 1rem;
-      overflow: hidden;
+      overflow: visible;
+      transition: background-color 0.3s, border-color 0.3s;
     }
 
     .subscription-header {
@@ -1113,6 +1412,23 @@ function serveAdminPanel(env, adminPath) {
       align-items: flex-start;
       justify-content: space-between;
       gap: 1rem;
+      position: relative;
+    }
+
+    .sub-drag-handle {
+      cursor: grab;
+      color: var(--text-dim);
+      opacity: 0.5;
+      transition: opacity 0.2s;
+      display: flex;
+      align-items: center;
+      padding: 0.25rem;
+      margin-right: 0.5rem;
+      flex-shrink: 0;
+    }
+
+    .sub-drag-handle:hover {
+      opacity: 1;
     }
 
     .subscription-info {
@@ -1125,6 +1441,7 @@ function serveAdminPanel(env, adminPath) {
       align-items: center;
       gap: 0.75rem;
       margin-bottom: 0.5rem;
+      flex-wrap: wrap;
     }
 
     .subscription-name {
@@ -1143,6 +1460,15 @@ function serveAdminPanel(env, adminPath) {
       font-size: 0.7rem;
       font-family: var(--font-code);
       color: var(--text-sub);
+    }
+
+    .update-time {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      font-size: 0.7rem;
+      font-family: var(--font-code);
+      color: var(--text-dim);
     }
 
     .subscription-links {
@@ -1168,10 +1494,10 @@ function serveAdminPanel(env, adminPath) {
       color: var(--primary);
       font-family: var(--font-code);
       text-decoration: none;
-      max-width: 300px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      max-width: 200px;
     }
 
     .link-url:hover {
@@ -1180,10 +1506,16 @@ function serveAdminPanel(env, adminPath) {
 
     .btn-copy-link {
       opacity: 0.6;
-      transition: opacity 0.2s;
+      transition: opacity 0.2s, color 0.2s;
+      flex-shrink: 0;
     }
 
     .btn-copy-link:hover {
+      opacity: 1;
+    }
+
+    .btn-copy-link.copied {
+      color: var(--success) !important;
       opacity: 1;
     }
 
@@ -1191,24 +1523,203 @@ function serveAdminPanel(env, adminPath) {
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
+      flex-shrink: 0;
     }
 
-.subscription-header {
-  position: relative;
-}
+    .subscription-actions-row {
+      display: flex;
+      gap: 0.5rem;
+    }
 
-.subscription-title-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.5rem;
-}
+    .subscription-actions-row .btn {
+      flex: 1;
+      min-width: 0;
+    }
+    
 
-.btn-edit-sub {
-  margin-left: 0.5rem;
-  flex-shrink: 0;
-}
+    /* 紧凑模式样式 */
+    .compact-mode .subscription-card {
+      margin-bottom: 0;
+      border-radius: 0;
+      border-bottom: none;
+    }
+    
+    .compact-mode .subscription-card:first-child {
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    
+    .compact-mode .subscription-card:last-child {
+      border-radius: 0 0 var(--radius) var(--radius);
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .compact-mode .subscription-card:only-child {
+      border-radius: var(--radius);
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .compact-mode .subscription-header {
+      padding: 0.5rem 1rem;
+      flex-direction: row;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .compact-mode .subscription-info {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex: 1;
+      min-width: 0;
+    }
+    
+    .compact-mode .subscription-title-row {
+      margin-bottom: 0;
+      flex-wrap: nowrap;
+      flex-shrink: 0;
+    }
+    
+    .compact-mode .update-time {
+      display: none;
+    }
+    
+    .compact-mode .subscription-links {
+      display: none;
+    }
+    
+    .compact-mode .compact-links {
+      display: flex !important;
+      align-items: center;
+      gap: 0.375rem;
+      flex: 1;
+      overflow: hidden;
+    }
+    
+    .compact-links {
+      display: none;
+    }
+    
+    .compact-link-item {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.2rem 0.5rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      font-size: 0.65rem;
+      font-family: var(--font-code);
+      color: var(--text-sub);
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    
+    .compact-link-item:hover {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: white;
+    }
+    
+    .compact-mode .subscription-actions {
+      flex-direction: row;
+      flex-wrap: nowrap;
+      gap: 0.375rem;
+    }
+    
+    .compact-mode .subscription-actions-row {
+      display: contents;
+    }
+    
+    .compact-mode .subscription-actions .btn {
+      flex: none;
+      padding: 0.375rem 0.625rem;
+      height: 28px;
+      font-size: 0.7rem;
+    }
+    
+    @media (max-width: 992px) {
+      .compact-mode .compact-links {
+        display: none !important;
+      }
+      
+      .compact-mode .subscription-header {
+        flex-wrap: wrap;
+      }
+      
+      .compact-mode .subscription-actions {
+        width: 100%;
+        margin-top: 0.5rem;
+        flex-wrap: wrap;
+      }
+      
+      .compact-mode .subscription-actions .btn {
+        flex: 1;
+      }
+    }
+    
+    
 
+    /* 下拉菜单 */
+    .dropdown {
+      position: relative;
+      display: inline-block;
+    }
+
+    .dropdown-menu {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 4px;
+      min-width: 200px;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      z-index: 1000;
+      opacity: 0;
+      visibility: hidden;
+      transform: translateY(-8px);
+      transition: all 0.15s ease;
+    }
+
+    .dropdown-menu.show {
+      opacity: 1;
+      visibility: visible;
+      transform: translateY(0);
+    }
+
+    .dropdown-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      color: var(--text-main);
+      font-size: 0.75rem;
+      cursor: pointer;
+      transition: background-color 0.15s;
+      border: none;
+      background: none;
+      width: 100%;
+      text-align: left;
+    }
+
+    .dropdown-item:hover {
+      background: var(--bg-hover);
+    }
+
+    .dropdown-item:first-child {
+      border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+    }
+
+    .dropdown-item:last-child {
+      border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+    }
+
+    .dropdown-divider {
+      height: 1px;
+      background: var(--border-color);
+      margin: 0.25rem 0;
+    }
 
     /* 节点列表区域 */
     .node-list-area {
@@ -1221,19 +1732,91 @@ function serveAdminPanel(env, adminPath) {
     .node-list-area.expanded {
       max-height: none;
       border-top-color: var(--border-color);
+      overflow: visible;
     }
 
     .node-list-content {
       padding: 1rem 1.25rem;
     }
 
-    /* 节点表格 */
-.node-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
+    /* 节点筛选和搜索 */
+    .node-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+    }
 
+    .node-search {
+      flex: 1;
+      min-width: 200px;
+      position: relative;
+    }
+
+    .node-search input {
+      width: 100%;
+      padding: 0.5rem 0.75rem 0.5rem 2rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-main);
+      font-size: 0.8rem;
+      font-family: var(--font-code);
+    }
+
+    .node-search input:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .node-search input::placeholder {
+      color: var(--text-dim);
+    }
+
+    .node-search-icon {
+      position: absolute;
+      left: 0.5rem;
+      top: 50%;
+      transform: translateY(-50%);
+      color: var(--text-dim);
+    }
+
+    .node-filters {
+      display: flex;
+      gap: 0.25rem;
+      flex-wrap: wrap;
+    }
+
+    .node-filter-btn {
+      padding: 0.25rem 0.5rem;
+      background: var(--bg-input);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-sm);
+      color: var(--text-sub);
+      font-size: 0.65rem;
+      font-family: var(--font-code);
+      cursor: pointer;
+      transition: all 0.15s;
+      text-transform: uppercase;
+    }
+
+    .node-filter-btn:hover {
+      background: var(--bg-hover);
+    }
+
+    .node-filter-btn.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: white;
+    }
+
+    /* 节点表格 */
+    .node-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+    }
 
     .node-table th {
       text-align: left;
@@ -1269,9 +1852,12 @@ function serveAdminPanel(env, adminPath) {
       opacity: 0.5;
     }
 
-    .node-row.disabled .node-name,
-    .node-row.disabled .node-link {
+    .node-row.disabled .node-name {
       text-decoration: line-through;
+    }
+
+    .node-row.hidden {
+      display: none;
     }
 
     .node-cell-name {
@@ -1305,26 +1891,23 @@ function serveAdminPanel(env, adminPath) {
       opacity: 1;
     }
 
-.node-name {
-  display: block;
-  font-family: var(--font-code);
-  font-size: 0.8rem;
-  color: var(--text-main);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+    .node-name {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-code);
+      font-size: 0.8rem;
+      color: var(--text-main);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
-.node-link {
-  display: block;
-  font-family: var(--font-code);
-  font-size: 0.75rem;
-  color: var(--text-sub);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
+    .node-name-text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
 
     .node-actions {
       display: flex;
@@ -1332,6 +1915,30 @@ function serveAdminPanel(env, adminPath) {
       gap: 0.25rem;
       justify-content: flex-end;
     }
+
+    /* 节点类型标签 */
+    .node-type-tag {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.125rem 0.375rem;
+      border-radius: 4px;
+      font-size: 0.6rem;
+      font-weight: 600;
+      font-family: var(--font-code);
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    .node-type-ss { background: #10b981; color: white; }
+    .node-type-vmess { background: #8b5cf6; color: white; }
+    .node-type-trojan { background: #ef4444; color: white; }
+    .node-type-vless { background: #3b82f6; color: white; }
+    .node-type-hysteria2 { background: #f59e0b; color: #000; }
+    .node-type-tuic { background: #ec4899; color: white; }
+    .node-type-socks { background: #6b7280; color: white; }
+    .node-type-snell { background: #14b8a6; color: white; }
+    .node-type-unknown { background: #374151; color: white; }
 
     /* 批量操作栏 */
     .batch-actions-bar {
@@ -1401,7 +2008,7 @@ function serveAdminPanel(env, adminPath) {
       max-height: 90vh;
       overflow: hidden;
       transform: scale(0.95);
-      transition: transform 0.2s;
+      transition: transform 0.2s, background-color 0.3s, border-color 0.3s;
     }
 
     .modal-overlay.show .modal {
@@ -1494,7 +2101,7 @@ function serveAdminPanel(env, adminPath) {
       color: var(--danger);
     }
 
-    .form-input {
+    .form-input, .form-select {
       width: 100%;
       padding: 0.625rem 0.875rem;
       background: var(--bg-input);
@@ -1503,10 +2110,10 @@ function serveAdminPanel(env, adminPath) {
       color: var(--text-main);
       font-size: 0.8125rem;
       font-family: var(--font-code);
-      transition: border-color 0.2s, box-shadow 0.2s;
+      transition: border-color 0.2s, box-shadow 0.2s, background-color 0.3s;
     }
 
-    .form-input:focus {
+    .form-input:focus, .form-select:focus {
       outline: none;
       border-color: var(--primary);
       box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
@@ -1556,7 +2163,7 @@ function serveAdminPanel(env, adminPath) {
       align-items: center;
       gap: 0.625rem;
       padding: 0.75rem 1rem;
-      background: rgba(18, 18, 18, 0.95);
+      background: var(--bg-card);
       backdrop-filter: blur(8px);
       border: 1px solid var(--border-color);
       border-radius: var(--radius-sm);
@@ -1565,7 +2172,7 @@ function serveAdminPanel(env, adminPath) {
       color: var(--text-main);
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
       transform: translateX(120%);
-      transition: transform 0.3s ease;
+      transition: transform 0.3s ease, background-color 0.3s;
       max-width: 360px;
     }
 
@@ -1602,6 +2209,28 @@ function serveAdminPanel(env, adminPath) {
       font-size: 0.8rem;
     }
 
+    .empty-state-large {
+      padding: 3rem 2rem;
+    }
+
+    .empty-state-large svg {
+      color: var(--text-dim);
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+
+    .empty-state-large h3 {
+      font-size: 1rem;
+      color: var(--text-main);
+      margin-bottom: 0.5rem;
+    }
+
+    .empty-state-large p {
+      font-size: 0.8rem;
+      color: var(--text-sub);
+      margin-bottom: 1rem;
+    }
+
     /* 加载动画 */
     @keyframes spin {
       from { transform: rotate(0deg); }
@@ -1610,6 +2239,41 @@ function serveAdminPanel(env, adminPath) {
 
     .spin {
       animation: spin 1s linear infinite;
+    }
+
+    /* 二维码模态框 */
+    .qrcode-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .qrcode-image {
+      background: white;
+      padding: 1rem;
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .qrcode-image img {
+      display: block;
+      width: 200px;
+      height: 200px;
+      min-width: 200px;
+      min-height: 200px;
+    }
+
+    .qrcode-url {
+      font-size: 0.75rem;
+      font-family: var(--font-code);
+      color: var(--text-sub);
+      word-break: break-all;
+      text-align: center;
+      max-width: 100%;
+      padding: 0 1rem;
     }
 
     /* 响应式 */
@@ -1629,11 +2293,14 @@ function serveAdminPanel(env, adminPath) {
       }
 
       .subscription-actions {
-        flex-direction: row;
         width: 100%;
       }
 
-      .subscription-actions .btn {
+      .subscription-actions-row {
+        width: 100%;
+      }
+
+      .subscription-actions-row .btn {
         flex: 1;
       }
 
@@ -1642,12 +2309,7 @@ function serveAdminPanel(env, adminPath) {
       }
 
       .link-url {
-        max-width: 180px;
-      }
-
-      .node-table th:nth-child(2),
-      .node-row td:nth-child(2) {
-        display: none;
+        max-width: 120px;
       }
 
       .node-name {
@@ -1689,6 +2351,21 @@ function serveAdminPanel(env, adminPath) {
       .modal-body {
         max-height: 50vh;
       }
+
+      .node-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .node-search {
+        min-width: auto;
+      }
+
+      .node-filters {
+        overflow-x: auto;
+        flex-wrap: nowrap;
+        padding-bottom: 0.25rem;
+      }
     }
   </style>
 </head>
@@ -1698,10 +2375,19 @@ function serveAdminPanel(env, adminPath) {
       <span class="logo">${SVG_ICONS.cube}</span>
       <span>Sub-Hub</span>
     </a>
-    <a href="/${adminPath}/logout" class="btn-logout">
-      ${SVG_ICONS.logout}
-      <span>退出</span>
-    </a>
+    <div class="navbar-right">
+    <button class="btn-layout" id="layoutToggle" onclick="toggleLayout()" title="切换布局">
+    <span id="layoutIcon">${SVG_ICONS.layoutList}</span>
+    <span id="layoutText">紧凑</span>
+  </button>
+      <button class="btn-theme" onclick="toggleTheme()" title="切换主题">
+        <span id="themeIcon">${SVG_ICONS.moon}</span>
+      </button>
+      <a href="/${adminPath}/logout" class="btn-logout">
+        ${SVG_ICONS.logout}
+        <span>退出</span>
+      </a>
+    </div>
   </nav>
 
   <div class="container">
@@ -1764,6 +2450,12 @@ function serveAdminPanel(env, adminPath) {
             <div class="form-hint">仅支持小写字母、数字和连字符，5-50个字符</div>
             <div class="form-error" id="editSubPathError"></div>
           </div>
+          <div class="form-group">
+            <label class="form-label">订阅转换后端</label>
+            <select class="form-select" name="converterBackend" id="editConverterBackend">
+            </select>
+            <div class="form-hint">选择不同的订阅转换后端服务器</div>
+          </div>
         </form>
       </div>
       <div class="modal-footer modal-footer-split">
@@ -1812,6 +2504,43 @@ Base64编码格式
     </div>
   </div>
 
+  <!-- 替换节点模态框 -->
+  <div class="modal-overlay" id="replaceNodeModal">
+    <div class="modal modal-lg">
+      <div class="modal-header">
+        <h3 class="modal-title">${SVG_ICONS.refresh} 替换节点</h3>
+        <button class="modal-close" onclick="hideModal('replaceNodeModal')">${SVG_ICONS.x}</button>
+      </div>
+      <div class="modal-body">
+        <form id="replaceNodeForm" onsubmit="return false;">
+          <input type="hidden" name="subscriptionPath">
+          <div class="form-group">
+            <label class="form-label">新节点内容 <span class="required">*</span></label>
+            <textarea class="form-input" name="content" required placeholder="粘贴新的节点内容，将删除所有旧节点并替换为新节点
+
+支持的格式：
+ss://...
+vmess://...
+trojan://...
+vless://...
+socks://...
+hysteria2://...
+tuic://...
+snell格式（仅Surge）
+Base64编码格式
+
+可一次添加多个节点，每行一个"></textarea>
+          </div>
+          <div class="form-hint" style="color: var(--warning);">⚠️ 此操作将删除该订阅下的所有现有节点！</div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="hideModal('replaceNodeModal')">取消</button>
+        <button class="btn btn-warning" onclick="replaceNodes()">${SVG_ICONS.refresh} 确认替换</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 编辑节点模态框 -->
   <div class="modal-overlay" id="editNodeModal">
     <div class="modal modal-lg">
@@ -1836,11 +2565,34 @@ Base64编码格式
     </div>
   </div>
 
+  <!-- 二维码模态框 -->
+  <div class="modal-overlay" id="qrcodeModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title">${SVG_ICONS.qrcode} 订阅二维码</h3>
+        <button class="modal-close" onclick="hideModal('qrcodeModal')">${SVG_ICONS.x}</button>
+      </div>
+      <div class="modal-body">
+        <div class="qrcode-container">
+          <div class="qrcode-image">
+            <img id="qrcodeImage" src="" alt="QR Code">
+          </div>
+          <div class="qrcode-url" id="qrcodeUrl"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="copyQRCodeUrl()">复制链接</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast容器 -->
   <div class="toast-container" id="toastContainer"></div>
 
   <script>
     const adminPath = '${adminPath}';
+    const CONVERTER_BACKENDS = ${converterBackendsJson};
+    
     const SVG_ICONS = {
       cube: \`${SVG_ICONS.cube}\`,
       server: \`${SVG_ICONS.server}\`,
@@ -1865,8 +2617,88 @@ Base64编码格式
       alertTriangle: \`${SVG_ICONS.alertTriangle}\`,
       alertCircle: \`${SVG_ICONS.alertCircle}\`,
       loader: \`${SVG_ICONS.loader}\`,
-      externalLink: \`${SVG_ICONS.externalLink}\`
+      externalLink: \`${SVG_ICONS.externalLink}\`,
+      sun: \`${SVG_ICONS.sun}\`,
+      moon: \`${SVG_ICONS.moon}\`,
+      qrcode: \`${SVG_ICONS.qrcode}\`,
+      refresh: \`${SVG_ICONS.refresh}\`,
+      copyAll: \`${SVG_ICONS.copyAll}\`,
+      download: \`${SVG_ICONS.download}\`,
+      chevronDown: \`${SVG_ICONS.chevronDown}\`,
+      clock: \`${SVG_ICONS.clock}\`,
+      settings: \`${SVG_ICONS.settings}\`,
+      search: \`${SVG_ICONS.search}\`,
+      filter: \`${SVG_ICONS.filter}\`,
+      layoutGrid: \`${SVG_ICONS.layoutGrid}\`,
+      layoutList: \`${SVG_ICONS.layoutList}\`,
+      package: \`${SVG_ICONS.package}\`
     };
+
+    // 存储订阅数据
+    let subscriptionsData = [];
+    let currentQRCodeUrl = '';
+    let isCompactMode = localStorage.getItem('compactMode') === 'true';
+
+    // 初始化后端选择器
+    function initConverterSelect() {
+      const select = document.getElementById('editConverterBackend');
+      if (select) {
+        select.innerHTML = CONVERTER_BACKENDS.map(b => 
+          \`<option value="\${b.id}">\${b.name} (\${b.label})</option>\`
+        ).join('');
+      }
+    }
+
+    // 布局切换
+    function initLayout() {
+      updateLayoutUI();
+    }
+
+    function toggleLayout() {
+      isCompactMode = !isCompactMode;
+      localStorage.setItem('compactMode', isCompactMode);
+      updateLayoutUI();
+      loadSubscriptions();
+    }
+
+    function updateLayoutUI() {
+      const btn = document.getElementById('layoutToggle');
+      const icon = document.getElementById('layoutIcon');
+      const text = document.getElementById('layoutText');
+      if (isCompactMode) {
+        btn.classList.add('active');
+        icon.innerHTML = SVG_ICONS.layoutList;
+        text.textContent = '紧凑';
+        document.getElementById('subscriptionList').classList.add('compact-mode');
+      } else {
+        btn.classList.remove('active');
+        icon.innerHTML = SVG_ICONS.layoutGrid;
+        text.textContent = '宽松';
+        document.getElementById('subscriptionList').classList.remove('compact-mode');
+      }
+    }
+    
+    
+
+    // 主题切换功能
+    function initTheme() {
+      const savedTheme = localStorage.getItem('theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', savedTheme);
+      updateThemeIcon(savedTheme);
+    }
+
+    function toggleTheme() {
+      const currentTheme = document.documentElement.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      updateThemeIcon(newTheme);
+    }
+
+    function updateThemeIcon(theme) {
+      const iconEl = document.getElementById('themeIcon');
+      iconEl.innerHTML = theme === 'dark' ? SVG_ICONS.moon : SVG_ICONS.sun;
+    }
 
     // 节点类型常量
     const NODE_TYPES_FRONTEND = {
@@ -1880,9 +2712,61 @@ Base64编码格式
       SNELL: 'snell,'
     };
 
-    // 检测是否为移动设备
+    // 获取节点类型
+    function getNodeType(nodeLink) {
+      if (!nodeLink) return 'unknown';
+      const lowerLink = nodeLink.toLowerCase();
+      
+      if (lowerLink.startsWith('ss://')) return 'ss';
+      if (lowerLink.startsWith('vmess://')) return 'vmess';
+      if (lowerLink.startsWith('trojan://')) return 'trojan';
+      if (lowerLink.startsWith('vless://')) return 'vless';
+      if (lowerLink.startsWith('hysteria2://')) return 'hysteria2';
+      if (lowerLink.startsWith('tuic://')) return 'tuic';
+      if (lowerLink.startsWith('socks://')) return 'socks';
+      if (lowerLink.includes('snell,')) return 'snell';
+      
+      return 'unknown';
+    }
+
+    function getNodeTypeLabel(type) {
+      const labels = {
+        ss: 'SS',
+        vmess: 'VMess',
+        trojan: 'Trojan',
+        vless: 'VLESS',
+        hysteria2: 'Hy2',
+        tuic: 'TUIC',
+        socks: 'SOCKS',
+        snell: 'Snell',
+        unknown: '?'
+      };
+      return labels[type] || '?';
+    }
+
     function isMobileDevice() {
       return window.innerWidth <= 768 || 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    }
+
+    // 格式化相对时间
+    function formatRelativeTime(timestamp) {
+      if (!timestamp) return '从未更新';
+      
+      const now = Date.now();
+      const diff = now - timestamp;
+      
+      const seconds = Math.floor(diff / 1000);
+      const minutes = Math.floor(seconds / 60);
+      const hours = Math.floor(minutes / 60);
+      const days = Math.floor(hours / 24);
+      
+      if (seconds < 60) return '刚刚';
+      if (minutes < 60) return \`\${minutes}分钟前\`;
+      if (hours < 24) return \`\${hours}小时前\`;
+      if (days < 30) return \`\${days}天前\`;
+      
+      const date = new Date(timestamp);
+      return date.toLocaleDateString('zh-CN');
     }
 
     // Toast 提示
@@ -1934,25 +2818,135 @@ Base64编码格式
       document.body.style.overflow = '';
     }
 
-    // 复制到剪贴板
-    function copyToClipboard(text) {
+    // 复制到剪贴板（带动画）
+    function copyToClipboard(text, buttonEl) {
       navigator.clipboard.writeText(text).then(() => {
         showToast('已复制到剪贴板', 'success');
+        if (buttonEl) {
+          const originalHTML = buttonEl.innerHTML;
+          buttonEl.innerHTML = SVG_ICONS.check;
+          buttonEl.classList.add('copied');
+          setTimeout(() => {
+            buttonEl.innerHTML = originalHTML;
+            buttonEl.classList.remove('copied');
+          }, 1500);
+        }
       }).catch(() => {
         showToast('复制失败', 'danger');
       });
     }
 
+    // 显示二维码
+    function showQRCode(url) {
+      currentQRCodeUrl = url;
+      const qrcodeImage = document.getElementById('qrcodeImage');
+      const qrcodeUrl = document.getElementById('qrcodeUrl');
+      
+      const qrApiUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(url);
+      qrcodeImage.src = qrApiUrl;
+      qrcodeUrl.textContent = url;
+      
+      showModal('qrcodeModal');
+    }
+
+    function copyQRCodeUrl() {
+      copyToClipboard(currentQRCodeUrl);
+    }
+
     // 生成订阅转换器链接
-    function generateSubConverterUrl(path) {
+    function generateSubConverterUrl(path, backend, target = 'clash') {
       const origin = window.location.origin;
       const v2rayUrl = origin + '/' + path + '/v2ray';
       const encodedUrl = encodeURIComponent(v2rayUrl);
-      return 'https://sub.xeton.dev/sub?target=clash&url=' + encodedUrl + '&insert=false&config=https%3A%2F%2Fraw.githubusercontent.com%2Fszkane%2FClashRuleSet%2Fmain%2FClash%2Fkclash.ini&emoji=true&list=false&xudp=false&udp=true&tfo=false&expand=false&scv=false&fdn=false&new_name=true';
+      
+      const backendUrl = backend || 'sub.xeton.dev';
+      
+      let targetParam = target;
+      let extraParams = '';
+      
+      switch(target) {
+        case 'clash':
+          targetParam = 'clash';
+          break;
+        case 'surge':
+          targetParam = 'surge';
+          extraParams = '&ver=4';
+          break;
+        case 'loon':
+          targetParam = 'loon';
+          break;
+        case 'quanx':
+          targetParam = 'quanx';
+          break;
+        case 'shadowrocket':
+          targetParam = 'mixed';
+          break;
+        default:
+          targetParam = 'clash';
+      }
+      
+      return \`https://\${backendUrl}/sub?target=\${targetParam}&url=\${encodedUrl}&insert=false&config=https%3A%2F%2Fraw.githubusercontent.com%2Fszkane%2FClashRuleSet%2Fmain%2FClash%2Fkclash.ini&emoji=true&list=false&xudp=false&udp=true&tfo=false&expand=false&scv=false&fdn=false&new_name=true\${extraParams}\`;
     }
 
+    // 一键导入各客户端
+    function importToClient(path, backend, client) {
+      const converterUrl = generateSubConverterUrl(path, backend, client === 'surge' ? 'surge' : client === 'quanx' ? 'quanx' : client === 'loon' ? 'loon' : 'clash');
+      
+      let importUrl = '';
+      switch(client) {
+        case 'clash':
+          importUrl = 'clash://install-config?url=' + encodeURIComponent(converterUrl);
+          break;
+        case 'stash':
+          importUrl = 'stash://install-config?url=' + encodeURIComponent(converterUrl);
+          break;
+        case 'surge':
+          importUrl = 'surge:///install-config?url=' + encodeURIComponent(converterUrl);
+          break;
+        case 'loon':
+          importUrl = 'loon://import?sub=' + encodeURIComponent(converterUrl);
+          break;
+        case 'shadowrocket':
+          const origin = window.location.origin;
+          const v2rayUrl = origin + '/' + path + '/v2ray';
+          importUrl = 'sub://' + btoa(v2rayUrl);
+          break;
+        case 'quanx':
+          importUrl = 'quantumult-x:///add-resource?remote-resource=' + encodeURIComponent(JSON.stringify({
+            server_remote: [converterUrl + ', tag=SubHub']
+          }));
+          break;
+      }
+      
+      if (importUrl) {
+        window.location.href = importUrl;
+        showToast(\`正在唤起 \${client} 客户端...\`, 'info');
+      }
+    }
+
+    // 关闭所有下拉菜单
+    function closeAllDropdowns() {
+      document.querySelectorAll('.dropdown-menu.show').forEach(menu => {
+        menu.classList.remove('show');
+      });
+    }
+
+    // 切换下拉菜单
+    function toggleDropdown(e, menuId) {
+      e.stopPropagation();
+      const menu = document.getElementById(menuId);
+      const isOpen = menu.classList.contains('show');
+      closeAllDropdowns();
+      if (!isOpen) {
+        menu.classList.add('show');
+      }
+    }
+
+    // 点击其他地方关闭下拉菜单
+    document.addEventListener('click', closeAllDropdowns);
+
     // 复制订阅链接
-    function copySubscriptionLink(path, type) {
+    function copySubscriptionLink(path, type, backend, btnEl) {
       const origin = window.location.origin;
       let url = '';
       switch(type) {
@@ -1960,9 +2954,137 @@ Base64编码格式
         case 2: url = origin + '/' + path + '/v2ray'; break;
         case 3: url = origin + '/' + path + '/surge'; break;
         case 4: url = origin + '/' + path + '/clash'; break;
-        case 5: url = generateSubConverterUrl(path); break;
+        case 5: url = generateSubConverterUrl(path, backend); break;
       }
-      copyToClipboard(url);
+      copyToClipboard(url, btnEl);
+    }
+
+    // 显示订阅二维码
+    function showSubscriptionQRCode(path, type, backend) {
+      const origin = window.location.origin;
+      let url = '';
+      switch(type) {
+        case 1: url = origin + '/' + path; break;
+        case 2: url = origin + '/' + path + '/v2ray'; break;
+        case 3: url = origin + '/' + path + '/surge'; break;
+        case 4: url = origin + '/' + path + '/clash'; break;
+        case 5: url = generateSubConverterUrl(path, backend); break;
+      }
+      showQRCode(url);
+    }
+
+    // 复制所有节点
+    async function copyAllNodes(subscriptionPath) {
+      try {
+        const response = await fetch('/' + adminPath + '/api/subscriptions/' + subscriptionPath + '/nodes');
+        if (!response.ok) throw new Error('加载失败');
+        
+        const result = await response.json();
+        if (!result.success) throw new Error(result.message || '加载失败');
+        
+        const nodes = result.data || [];
+        const enabledNodes = nodes.filter(n => n.enabled === 1);
+        
+        if (enabledNodes.length === 0) {
+          showToast('没有已启用的节点', 'warning');
+          return;
+        }
+        
+        const allLinks = enabledNodes.map(n => n.original_link).join('\\n');
+        copyToClipboard(allLinks);
+        showToast(\`已复制 \${enabledNodes.length} 个节点\`, 'success');
+      } catch (error) {
+        showToast('复制失败: ' + error.message, 'danger');
+      }
+    }
+
+    // 显示替换节点模态框
+    function showReplaceNodeModal(subscriptionPath) {
+      const form = document.getElementById('replaceNodeForm');
+      form.reset();
+      form.querySelector('[name="subscriptionPath"]').value = subscriptionPath;
+      showModal('replaceNodeModal');
+    }
+
+    // 替换节点
+    async function replaceNodes() {
+      const form = document.getElementById('replaceNodeForm');
+      const subscriptionPath = form.querySelector('[name="subscriptionPath"]').value;
+      const content = form.querySelector('[name="content"]').value.trim();
+      
+      if (!content) {
+        showToast('请输入节点内容', 'warning');
+        return;
+      }
+      
+      if (!confirm('确定要删除所有现有节点并替换为新节点吗？此操作不可撤销！')) {
+        return;
+      }
+      
+      const lines = content.split(/\\r?\\n/);
+      const validNodes = [];
+      
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+        
+        try {
+          const decodedContent = safeBase64DecodeFrontend(trimmedLine);
+          const decodedLines = decodedContent.split(/\\r?\\n/);
+          for (const decodedLine of decodedLines) {
+            if (decodedLine.trim() && isValidNodeLink(decodedLine.trim())) {
+              validNodes.push({
+                name: extractNodeNameFrontend(decodedLine.trim()),
+                content: decodedLine.trim()
+              });
+            }
+          }
+        } catch (e) {
+          if (isValidNodeLink(trimmedLine)) {
+            validNodes.push({
+              name: extractNodeNameFrontend(trimmedLine),
+              content: trimmedLine
+            });
+          }
+        }
+      }
+      
+      if (validNodes.length === 0) {
+        showToast('未找到有效的节点', 'warning');
+        return;
+      }
+      
+      try {
+        showToast('正在替换...', 'info');
+        
+        const timestamp = Date.now();
+        const nodesWithOrder = validNodes.map((node, index) => ({
+          name: node.name,
+          content: node.content,
+          order: timestamp + index
+        }));
+        
+        const response = await fetch('/' + adminPath + '/api/subscriptions/' + subscriptionPath + '/nodes/replace', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ nodes: nodesWithOrder })
+        });
+        
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.message);
+        
+        showToast(\`成功替换为 \${result.data?.count || validNodes.length} 个节点\`, 'success');
+        hideModal('replaceNodeModal');
+        form.reset();
+        await loadSubscriptions();
+        
+        const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
+        if (nodeListArea && nodeListArea.classList.contains('expanded')) {
+          await loadNodeList(subscriptionPath);
+        }
+      } catch (error) {
+        showToast('替换失败: ' + error.message, 'danger');
+      }
     }
 
     // 路径验证
@@ -1997,7 +3119,6 @@ Base64编码格式
       }
     }
 
-    // 安全的UTF-8解码
     function safeUtf8DecodeFrontend(str) {
       if (!str) return str;
       try {
@@ -2011,7 +3132,6 @@ Base64编码格式
       }
     }
 
-    // 提取节点名称
     function extractNodeNameFrontend(nodeLink) {
       if (!nodeLink) return '未命名节点';
       
@@ -2041,7 +3161,6 @@ Base64编码格式
       return '未命名节点';
     }
 
-    // 检查是否是有效的节点链接
     function isValidNodeLink(link) {
       const lowerLink = link.toLowerCase();
       if(lowerLink.includes('=') && lowerLink.includes('snell,')) {
@@ -2060,92 +3179,214 @@ Base64编码格式
         
         if (!result.success) throw new Error(result.message || '加载失败');
         
-        const subscriptions = result.data || [];
+        subscriptionsData = result.data || [];
         const listElement = document.getElementById('subscriptionList');
         
-        if (subscriptions.length === 0) {
-          listElement.innerHTML = '<div class="empty-state">// no subscriptions found</div>';
+        if (isCompactMode) {
+          listElement.classList.add('compact-mode');
+        } else {
+          listElement.classList.remove('compact-mode');
+        }
+        
+        if (subscriptionsData.length === 0) {
+          listElement.innerHTML = \`
+            <div class="empty-state empty-state-large">
+              \${SVG_ICONS.package}
+              <h3>还没有订阅</h3>
+              <p>点击上方"添加订阅"按钮创建你的第一个订阅</p>
+              <button class="btn btn-primary" onclick="showModal('addSubscriptionModal')">
+                \${SVG_ICONS.plus} 添加订阅
+              </button>
+            </div>
+          \`;
           return;
         }
         
-        listElement.innerHTML = subscriptions.map(sub => {
-          const subConverterUrl = generateSubConverterUrl(sub.path);
+        listElement.innerHTML = subscriptionsData.map(sub => {
+          const backend = sub.converter_backend || 'sub.xeton.dev';
+          const subConverterUrl = generateSubConverterUrl(sub.path, backend);
+          const updateTimeStr = formatRelativeTime(sub.updated_at);
+          
           return \`
-            <div class="subscription-card" data-path="\${sub.path}">
-<div class="subscription-header">
-  <div class="subscription-info">
-    <div class="subscription-title-row">
-      <span class="subscription-name">\${sub.name}</span>
-      <span class="node-count">\${SVG_ICONS.server} \${sub.nodeCount}</span>
-      <button class="btn btn-sm btn-icon btn-edit-sub" onclick="showEditSubscriptionModal('\${sub.path}', '\${sub.name}')" title="编辑">
-        \${SVG_ICONS.edit}
-      </button>
-    </div>
+            <div class="subscription-card" data-path="\${sub.path}" data-order="\${sub.sub_order || 0}">
+              <div class="subscription-header">
+                <span class="sub-drag-handle" title="拖拽排序">\${SVG_ICONS.grip}</span>
+                <div class="subscription-info">
+                  <div class="subscription-title-row">
+                    <span class="subscription-name">\${sub.name}</span>
+                    <span class="node-count">\${SVG_ICONS.server} \${sub.nodeCount}</span>
+                    <span class="update-time">\${SVG_ICONS.clock} \${updateTimeStr}</span>
+                    <button class="btn btn-sm btn-icon" onclick="showEditSubscriptionModal('\${sub.path}', '\${sub.name}', '\${backend}')" title="设置">
+                      \${SVG_ICONS.settings}
+                    </button>
+                  </div>
 
                   <div class="subscription-links">
                     <div class="link-row">
                       <span class="link-label">Default:</span>
-                      <a href="/\${sub.path}" target="_blank" class="link-url">/\${sub.path}</a>
-                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 1)" title="复制">\${SVG_ICONS.copy}</button>
+                      <a href="/\${sub.path}" target="_blank" class="link-url">原始订阅</a>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 1, '\${backend}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="showSubscriptionQRCode('\${sub.path}', 1, '\${backend}')" title="二维码">\${SVG_ICONS.qrcode}</button>
                     </div>
                     <div class="link-row">
                       <span class="link-label">V2Ray:</span>
-                      <a href="/\${sub.path}/v2ray" target="_blank" class="link-url">/\${sub.path}/v2ray</a>
-                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 2)" title="复制">\${SVG_ICONS.copy}</button>
+                      <a href="/\${sub.path}/v2ray" target="_blank" class="link-url">v2ray</a>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 2, '\${backend}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="showSubscriptionQRCode('\${sub.path}', 2, '\${backend}')" title="二维码">\${SVG_ICONS.qrcode}</button>
                     </div>
                     <div class="link-row">
                       <span class="link-label">Surge:</span>
-                      <a href="/\${sub.path}/surge" target="_blank" class="link-url">/\${sub.path}/surge</a>
-                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 3)" title="复制">\${SVG_ICONS.copy}</button>
+                      <a href="/\${sub.path}/surge" target="_blank" class="link-url">surge</a>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 3, '\${backend}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="showSubscriptionQRCode('\${sub.path}', 3, '\${backend}')" title="二维码">\${SVG_ICONS.qrcode}</button>
                     </div>
                     <div class="link-row">
                       <span class="link-label">Clash:</span>
-                      <a href="/\${sub.path}/clash" target="_blank" class="link-url">/\${sub.path}/clash</a>
-                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 4)" title="复制">\${SVG_ICONS.copy}</button>
+                      <a href="/\${sub.path}/clash" target="_blank" class="link-url">clash</a>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 4, '\${backend}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="showSubscriptionQRCode('\${sub.path}', 4, '\${backend}')" title="二维码">\${SVG_ICONS.qrcode}</button>
                     </div>
                     <div class="link-row">
                       <span class="link-label">Convert:</span>
-                      <a href="\${subConverterUrl}" target="_blank" class="link-url">订阅转换器 \${SVG_ICONS.externalLink}</a>
-                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 5)" title="复制">\${SVG_ICONS.copy}</button>
+                      <a href="\${subConverterUrl}" target="_blank" class="link-url">订阅转换 \${SVG_ICONS.externalLink}</a>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="copySubscriptionLink('\${sub.path}', 5, '\${backend}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                      <button class="btn btn-sm btn-icon btn-copy-link" onclick="showSubscriptionQRCode('\${sub.path}', 5, '\${backend}')" title="二维码">\${SVG_ICONS.qrcode}</button>
+                      <div class="dropdown">
+                      <button class="btn btn-sm btn-copy-link" onclick="toggleDropdown(event, 'import-menu-\${sub.path}')" title="一键导入">
+                      \${SVG_ICONS.download}
+                          \${SVG_ICONS.chevronDown}
+                        </button>
+                        <div class="dropdown-menu" id="import-menu-\${sub.path}">
+                          <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'clash')">
+                            <span style="width:20px;text-align:center;">🔥</span> Clash
+                          </button>
+                          <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'stash')">
+                            <span style="width:20px;text-align:center;">📦</span> Stash
+                          </button>
+                          <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'surge')">
+                            <span style="width:20px;text-align:center;">⚡</span> Surge
+                          </button>
+                          <div class="dropdown-divider"></div>
+                          <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'loon')">
+                          <span style="width:20px;text-align:center;">🎈</span> Loon
+                        </button>
+                        <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'shadowrocket')">
+                          <span style="width:20px;text-align:center;">🚀</span> Shadowrocket
+                        </button>
+                        <button class="dropdown-item" onclick="importToClient('\${sub.path}', '\${backend}', 'quanx')">
+                          <span style="width:20px;text-align:center;">🔰</span> Quantumult X
+                        </button>
+                      </div>
                     </div>
                   </div>
                 </div>
-                <div class="subscription-actions">
+
+                <div class="compact-links">
+                  <span class="compact-link-item" onclick="copySubscriptionLink('\${sub.path}', 1, '\${backend}', this)">Default</span>
+                  <span class="compact-link-item" onclick="copySubscriptionLink('\${sub.path}', 2, '\${backend}', this)">V2Ray</span>
+                  <span class="compact-link-item" onclick="copySubscriptionLink('\${sub.path}', 3, '\${backend}', this)">Surge</span>
+                  <span class="compact-link-item" onclick="copySubscriptionLink('\${sub.path}', 4, '\${backend}', this)">Clash</span>
+                  <span class="compact-link-item" onclick="copySubscriptionLink('\${sub.path}', 5, '\${backend}', this)">Convert</span>
+                </div>
+              </div>
+              <div class="subscription-actions">
+                <div class="subscription-actions-row">
                   <button class="btn btn-success" onclick="showAddNodeModal('\${sub.path}')">
                     \${SVG_ICONS.plus} 添加节点
                   </button>
-                  <button class="btn btn-primary" onclick="toggleNodeList('\${sub.path}')">
-                    \${SVG_ICONS.list} 节点列表
-                  </button>
+
+                    <button class="btn btn-primary" onclick="toggleNodeList('\${sub.path}')">
+                      \${SVG_ICONS.list} 节点列表
+                    </button>
+                  </div>
+                  <div class="subscription-actions-row">
+                    <button class="btn" onclick="copyAllNodes('\${sub.path}')" title="复制所有已启用节点">
+                      \${SVG_ICONS.copyAll} 复制全部
+                    </button>
+                    <button class="btn btn-warning" onclick="showReplaceNodeModal('\${sub.path}')" title="删除旧节点并替换">
+                      \${SVG_ICONS.refresh} 替换节点
+                    </button>
+                  </div>
                 </div>
               </div>
               <div class="node-list-area" id="node-list-\${sub.path}">
                 <div class="node-list-content">
                   <div id="batch-bar-\${sub.path}" style="display: none;"></div>
+                  <div class="node-toolbar" id="node-toolbar-\${sub.path}">
+                    <div class="node-search">
+                      <span class="node-search-icon">\${SVG_ICONS.search}</span>
+                      <input type="text" placeholder="搜索节点..." oninput="filterNodes('\${sub.path}', this.value)">
+                    </div>
+                    <div class="node-filters" id="node-filters-\${sub.path}">
+                      <button class="node-filter-btn active" data-type="all" onclick="filterNodesByType('\${sub.path}', 'all', this)">全部</button>
+                    </div>
+                    <button class="btn btn-sm" id="batch-btn-\${sub.path}" onclick="enterBatchMode('\${sub.path}')">\${SVG_ICONS.tasks} 批量</button>
+                  </div>
                   <table class="node-table">
-  <thead>
-    <tr>
-      <th style="width: 30%;">节点名称</th>
-      <th style="width: 40%;">节点链接</th>
-      <th style="width: 30%; text-align: right;">操作</th>
-    </tr>
-  </thead>
-
+                    <thead>
+                      <tr>
+                        <th style="width: 65%;">节点名称</th>
+                        <th style="width: 35%; text-align: right;">操作</th>
+                      </tr>
+                    </thead>
                     <tbody id="node-tbody-\${sub.path}"></tbody>
                   </table>
-                  <div id="node-footer-\${sub.path}" style="margin-top: 1rem; display: flex; justify-content: flex-end;">
-                    <button class="btn" onclick="enterBatchMode('\${sub.path}')">
-                      \${SVG_ICONS.tasks} 批量操作
-                    </button>
-                  </div>
+                  <div id="node-empty-\${sub.path}" style="display: none;"></div>
                 </div>
               </div>
             </div>
           \`;
         }).join('');
+
+        // 初始化订阅拖拽排序
+        initSubscriptionSortable();
       } catch (error) {
         showToast('加载订阅列表失败: ' + error.message, 'danger');
       }
+    }
+
+    // 初始化订阅拖拽排序
+    function initSubscriptionSortable() {
+      const listElement = document.getElementById('subscriptionList');
+      if (listElement.sortableInstance) {
+        listElement.sortableInstance.destroy();
+      }
+      
+      listElement.sortableInstance = new Sortable(listElement, {
+        animation: 150,
+        handle: '.sub-drag-handle',
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        dragClass: 'sortable-drag',
+        forceFallback: true,
+        fallbackTolerance: 3,
+        touchStartThreshold: 3,
+        delay: isMobileDevice() ? 150 : 0,
+        delayOnTouchOnly: true,
+        onEnd: async function(evt) {
+          try {
+            const cards = Array.from(listElement.querySelectorAll('.subscription-card'));
+            const newOrders = cards.map((card, index) => ({
+              path: card.dataset.path,
+              order: index
+            }));
+            
+            const response = await fetch('/' + adminPath + '/api/subscriptions/reorder', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ orders: newOrders })
+            });
+            
+            const result = await response.json();
+            if (!result.success) throw new Error(result.message);
+            
+            showToast('订阅顺序已更新', 'success');
+          } catch (error) {
+            showToast('更新排序失败: ' + error.message, 'danger');
+            await loadSubscriptions();
+          }
+        }
+      });
     }
 
     // 切换节点列表显示
@@ -2161,10 +3402,53 @@ Base64编码格式
       }
     }
 
+    // 节点搜索过滤
+    function filterNodes(subscriptionPath, keyword) {
+      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
+      const rows = tbody.querySelectorAll('.node-row');
+      const lowerKeyword = keyword.toLowerCase();
+      
+      rows.forEach(row => {
+        const name = row.querySelector('.node-name-text')?.textContent?.toLowerCase() || '';
+        if (name.includes(lowerKeyword)) {
+          row.classList.remove('hidden');
+        } else {
+          row.classList.add('hidden');
+        }
+      });
+    }
+
+    // 按类型过滤节点
+    function filterNodesByType(subscriptionPath, type, btn) {
+      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
+      const rows = tbody.querySelectorAll('.node-row');
+      const filtersContainer = document.getElementById('node-filters-' + subscriptionPath);
+      
+      // 更新按钮状态
+      filtersContainer.querySelectorAll('.node-filter-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      
+      rows.forEach(row => {
+        if (type === 'all') {
+          row.classList.remove('hidden');
+        } else {
+          const nodeType = row.dataset.type;
+          if (nodeType === type) {
+            row.classList.remove('hidden');
+          } else {
+            row.classList.add('hidden');
+          }
+        }
+      });
+    }
+
     // 加载节点列表
     async function loadNodeList(subscriptionPath) {
       const tbody = document.getElementById('node-tbody-' + subscriptionPath);
-      tbody.innerHTML = \`<tr><td colspan="3" class="empty-state">\${SVG_ICONS.loader} loading...</td></tr>\`;
+      const emptyEl = document.getElementById('node-empty-' + subscriptionPath);
+      const filtersContainer = document.getElementById('node-filters-' + subscriptionPath);
+      
+      tbody.innerHTML = \`<tr><td colspan="2" class="empty-state">\${SVG_ICONS.loader} loading...</td></tr>\`;
       
       try {
         const response = await fetch('/' + adminPath + '/api/subscriptions/' + subscriptionPath + '/nodes');
@@ -2176,36 +3460,60 @@ Base64编码格式
         const nodes = result.data || [];
         
         if (nodes.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="3" class="empty-state">// no nodes</td></tr>';
+          tbody.innerHTML = '';
+          emptyEl.style.display = 'block';
+          emptyEl.innerHTML = \`
+            <div class="empty-state empty-state-large">
+              \${SVG_ICONS.package}
+              <h3>还没有节点</h3>
+              <p>点击"添加节点"按钮添加你的第一个节点</p>
+              <button class="btn btn-success" onclick="showAddNodeModal('\${subscriptionPath}')">
+              + 添加节点
+            </button>
+            
+            </div>
+          \`;
           return;
         }
         
+        emptyEl.style.display = 'none';
+        
+        // 统计节点类型
+        const typeCounts = {};
+        nodes.forEach(node => {
+          const type = getNodeType(node.original_link);
+          typeCounts[type] = (typeCounts[type] || 0) + 1;
+        });
+        
+        // 更新过滤按钮
+        let filterBtns = \`<button class="node-filter-btn active" data-type="all" onclick="filterNodesByType('\${subscriptionPath}', 'all', this)">全部(\${nodes.length})</button>\`;
+        Object.entries(typeCounts).forEach(([type, count]) => {
+          filterBtns += \`<button class="node-filter-btn" data-type="\${type}" onclick="filterNodesByType('\${subscriptionPath}', '\${type}', this)">\${getNodeTypeLabel(type)}(\${count})</button>\`;
+        });
+        filtersContainer.innerHTML = filterBtns;
+        
         tbody.innerHTML = nodes.map((node, index) => {
           const isEnabled = node.enabled === 1;
-          const isFirst = index === 0;
-          const isLast = index === nodes.length - 1;
           const escapedLink = node.original_link.replace(/&/g, '&amp;').replace(/'/g, "\\'").replace(/"/g, '\\"');
+          const nodeType = getNodeType(node.original_link);
+          const nodeTypeLabel = getNodeTypeLabel(nodeType);
           
           return \`
-            <tr class="node-row \${!isEnabled ? 'disabled' : ''}" data-id="\${node.id}" data-order="\${node.node_order}">
+            <tr class="node-row \${!isEnabled ? 'disabled' : ''}" data-id="\${node.id}" data-order="\${node.node_order}" data-type="\${nodeType}">
               <td>
                 <div class="node-cell-name">
                   <input type="checkbox" class="node-checkbox" value="\${node.id}">
                   <span class="drag-handle" title="拖拽排序">\${SVG_ICONS.grip}</span>
-                  <span class="node-name" title="\${node.name}">\${node.name}</span>
+                  <div class="node-name">
+                    <span class="node-type-tag node-type-\${nodeType}">\${nodeTypeLabel}</span>
+                    <span class="node-name-text" title="\${node.name}">\${node.name}</span>
+                  </div>
                 </div>
               </td>
               <td>
-                <span class="node-link" title="\${node.original_link}">\${node.original_link}</span>
-              </td>
-              <td>
                 <div class="node-actions">
-                  <button class="btn btn-sm btn-icon btn-info" onclick="moveNodeToTop('\${subscriptionPath}', \${node.id})" title="移至顶部" \${isFirst ? 'disabled' : ''}>\${SVG_ICONS.chevronsUp}</button>
-                  <button class="btn btn-sm btn-icon btn-info" onclick="moveNodeUp('\${subscriptionPath}', \${node.id})" title="上移" \${isFirst ? 'disabled' : ''}>\${SVG_ICONS.arrowUp}</button>
-                  <button class="btn btn-sm btn-icon btn-info" onclick="moveNodeDown('\${subscriptionPath}', \${node.id})" title="下移" \${isLast ? 'disabled' : ''}>\${SVG_ICONS.arrowDown}</button>
-                  <button class="btn btn-sm btn-icon btn-info" onclick="moveNodeToBottom('\${subscriptionPath}', \${node.id})" title="移至底部" \${isLast ? 'disabled' : ''}>\${SVG_ICONS.chevronsDown}</button>
                   <button class="btn btn-sm btn-icon" onclick="showEditNodeModal('\${subscriptionPath}', '\${node.id}', '\${escapedLink}')" title="编辑">\${SVG_ICONS.edit}</button>
-                  <button class="btn btn-sm btn-icon" onclick="copyToClipboard('\${escapedLink}')" title="复制">\${SVG_ICONS.copy}</button>
+                  <button class="btn btn-sm btn-icon" onclick="copyToClipboard('\${escapedLink}', this)" title="复制">\${SVG_ICONS.copy}</button>
                   <button class="btn btn-sm btn-icon btn-danger" onclick="deleteNode('\${subscriptionPath}', \${node.id})" title="删除">\${SVG_ICONS.trash}</button>
                 </div>
               </td>
@@ -2213,11 +3521,10 @@ Base64编码格式
           \`;
         }).join('');
 
-        // 初始化拖拽排序（PC和移动端都启用）
         initializeSortable(tbody, subscriptionPath);
         
       } catch (error) {
-        tbody.innerHTML = \`<tr><td colspan="3" class="empty-state" style="color: var(--danger);">\${SVG_ICONS.alertCircle} \${error.message}</td></tr>\`;
+        tbody.innerHTML = \`<tr><td colspan="2" class="empty-state" style="color: var(--danger);">\${SVG_ICONS.alertCircle} \${error.message}</td></tr>\`;
       }
     }
 
@@ -2233,10 +3540,10 @@ Base64编码格式
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
         dragClass: 'sortable-drag',
-        forceFallback: true, // 移动端更好的兼容性
+        forceFallback: true,
         fallbackTolerance: 3,
         touchStartThreshold: 3,
-        delay: isMobileDevice() ? 150 : 0, // 移动端添加延迟防止误触
+        delay: isMobileDevice() ? 150 : 0,
         delayOnTouchOnly: true,
         onEnd: async function(evt) {
           try {
@@ -2266,108 +3573,19 @@ Base64编码格式
       const result = await response.json();
       if (!result.success) throw new Error(result.message || '保存排序失败');
       
-      await loadNodeList(subscriptionPath);
       return result;
-    }
-
-    // 节点移动功能
-    async function moveNodeUp(subscriptionPath, nodeId) {
-      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
-      const rows = Array.from(tbody.querySelectorAll('.node-row'));
-      const currentIndex = rows.findIndex(row => parseInt(row.dataset.id) === nodeId);
-      
-      if (currentIndex <= 0) return;
-      
-      const newOrders = rows.map((row, index) => {
-        const id = parseInt(row.dataset.id);
-        if (index === currentIndex - 1) return { id, order: currentIndex };
-        if (index === currentIndex) return { id, order: currentIndex - 1 };
-        return { id, order: index };
-      });
-      
-      try {
-        await updateNodeOrder(subscriptionPath, newOrders);
-        showToast('节点已上移', 'success');
-      } catch (error) {
-        showToast('上移失败: ' + error.message, 'danger');
-      }
-    }
-
-    async function moveNodeDown(subscriptionPath, nodeId) {
-      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
-      const rows = Array.from(tbody.querySelectorAll('.node-row'));
-      const currentIndex = rows.findIndex(row => parseInt(row.dataset.id) === nodeId);
-      
-      if (currentIndex >= rows.length - 1) return;
-      
-      const newOrders = rows.map((row, index) => {
-        const id = parseInt(row.dataset.id);
-        if (index === currentIndex) return { id, order: currentIndex + 1 };
-        if (index === currentIndex + 1) return { id, order: currentIndex };
-        return { id, order: index };
-      });
-      
-      try {
-        await updateNodeOrder(subscriptionPath, newOrders);
-        showToast('节点已下移', 'success');
-      } catch (error) {
-        showToast('下移失败: ' + error.message, 'danger');
-      }
-    }
-
-    async function moveNodeToTop(subscriptionPath, nodeId) {
-      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
-      const rows = Array.from(tbody.querySelectorAll('.node-row'));
-      const currentIndex = rows.findIndex(row => parseInt(row.dataset.id) === nodeId);
-      
-      if (currentIndex <= 0) return;
-      
-      const newOrders = rows.map((row, index) => {
-        const id = parseInt(row.dataset.id);
-        if (id === nodeId) return { id, order: 0 };
-        if (index < currentIndex) return { id, order: index + 1 };
-        return { id, order: index };
-      });
-      
-      try {
-        await updateNodeOrder(subscriptionPath, newOrders);
-        showToast('节点已移至顶部', 'success');
-      } catch (error) {
-        showToast('移动失败: ' + error.message, 'danger');
-      }
-    }
-
-    async function moveNodeToBottom(subscriptionPath, nodeId) {
-      const tbody = document.getElementById('node-tbody-' + subscriptionPath);
-      const rows = Array.from(tbody.querySelectorAll('.node-row'));
-      const currentIndex = rows.findIndex(row => parseInt(row.dataset.id) === nodeId);
-      
-      if (currentIndex >= rows.length - 1) return;
-      
-      const lastIndex = rows.length - 1;
-      const newOrders = rows.map((row, index) => {
-        const id = parseInt(row.dataset.id);
-        if (id === nodeId) return { id, order: lastIndex };
-        if (index > currentIndex) return { id, order: index - 1 };
-        return { id, order: index };
-      });
-      
-      try {
-        await updateNodeOrder(subscriptionPath, newOrders);
-        showToast('节点已移至底部', 'success');
-      } catch (error) {
-        showToast('移动失败: ' + error.message, 'danger');
-      }
     }
 
     // 批量操作模式
     function enterBatchMode(subscriptionPath) {
       const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
       const batchBar = document.getElementById('batch-bar-' + subscriptionPath);
-      const footer = document.getElementById('node-footer-' + subscriptionPath);
+      const batchBtn = document.getElementById('batch-btn-' + subscriptionPath);
+      const toolbar = document.getElementById('node-toolbar-' + subscriptionPath);
       
       nodeListArea.querySelector('.node-list-content').classList.add('batch-mode');
-      footer.style.display = 'none';
+      
+      if (batchBtn) batchBtn.style.display = 'none';
       
       batchBar.style.display = 'block';
       batchBar.innerHTML = \`
@@ -2376,11 +3594,9 @@ Base64编码格式
             <button class="btn btn-sm" onclick="toggleSelectAll('\${subscriptionPath}')" id="select-all-btn-\${subscriptionPath}">
               \${SVG_ICONS.checkSquare} 全选
             </button>
-<button class="btn btn-sm" onclick="invertSelection('\${subscriptionPath}')">
-  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4"></path><path d="M20 7H4"></path><path d="M8 21l-4-4 4-4"></path><path d="M4 17h16"></path></svg> 反选
-</button>
-
-			
+            <button class="btn btn-sm" onclick="invertSelection('\${subscriptionPath}')">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4"></path><path d="M20 7H4"></path><path d="M8 21l-4-4 4-4"></path><path d="M4 17h16"></path></svg> 反选
+            </button>
           </div>
           <div class="batch-actions-right">
             <button class="btn btn-sm btn-success" onclick="executeBatchStatusChange('\${subscriptionPath}', true)">
@@ -2405,35 +3621,33 @@ Base64编码格式
     function exitBatchMode(subscriptionPath) {
       const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
       const batchBar = document.getElementById('batch-bar-' + subscriptionPath);
-      const footer = document.getElementById('node-footer-' + subscriptionPath);
+      const batchBtn = document.getElementById('batch-btn-' + subscriptionPath);
       
       nodeListArea.querySelector('.node-list-content').classList.remove('batch-mode');
       batchBar.style.display = 'none';
-      footer.style.display = 'flex';
       
-      // 取消所有选择
+      if (batchBtn) batchBtn.style.display = '';
+      
       nodeListArea.querySelectorAll('.node-checkbox').forEach(cb => cb.checked = false);
     }
 
-function toggleSelectAll(subscriptionPath) {
-  const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
-  const checkboxes = nodeListArea.querySelectorAll('.node-checkbox');
-  const btn = document.getElementById('select-all-btn-' + subscriptionPath);
-  
-  const checkedCount = nodeListArea.querySelectorAll('.node-checkbox:checked').length;
-  const isAllSelected = checkedCount === checkboxes.length && checkboxes.length > 0;
-  
-  checkboxes.forEach(cb => cb.checked = !isAllSelected);
-  btn.innerHTML = isAllSelected ? \`\${SVG_ICONS.checkSquare} 全选\` : \`\${SVG_ICONS.x} 取消全选\`;
-}
+    function toggleSelectAll(subscriptionPath) {
+      const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
+      const checkboxes = nodeListArea.querySelectorAll('.node-checkbox');
+      const btn = document.getElementById('select-all-btn-' + subscriptionPath);
+      
+      const checkedCount = nodeListArea.querySelectorAll('.node-checkbox:checked').length;
+      const isAllSelected = checkedCount === checkboxes.length && checkboxes.length > 0;
+      
+      checkboxes.forEach(cb => cb.checked = !isAllSelected);
+      btn.innerHTML = isAllSelected ? \`\${SVG_ICONS.checkSquare} 全选\` : \`\${SVG_ICONS.x} 取消全选\`;
+    }
 
-// 反选
-function invertSelection(subscriptionPath) {
-  const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
-  const checkboxes = nodeListArea.querySelectorAll('.node-checkbox');
-  checkboxes.forEach(cb => cb.checked = !cb.checked);
-}
-
+    function invertSelection(subscriptionPath) {
+      const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
+      const checkboxes = nodeListArea.querySelectorAll('.node-checkbox');
+      checkboxes.forEach(cb => cb.checked = !cb.checked);
+    }
 
     async function executeBatchDelete(subscriptionPath) {
       const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
@@ -2580,7 +3794,11 @@ function invertSelection(subscriptionPath) {
         hideModal('addNodeModal');
         form.reset();
         await loadSubscriptions();
-        await loadNodeList(subscriptionPath);
+        
+        const nodeListArea = document.getElementById('node-list-' + subscriptionPath);
+        if (nodeListArea && nodeListArea.classList.contains('expanded')) {
+          await loadNodeList(subscriptionPath);
+        }
       } catch (error) {
         showToast('添加失败: ' + error.message, 'danger');
       }
@@ -2695,11 +3913,15 @@ function invertSelection(subscriptionPath) {
     }
 
     // 显示编辑订阅模态框
-    function showEditSubscriptionModal(path, name) {
+    function showEditSubscriptionModal(path, name, backend) {
       const form = document.getElementById('editSubscriptionForm');
       form.querySelector('[name="originalPath"]').value = path;
       form.querySelector('[name="name"]').value = name;
       form.querySelector('[name="path"]').value = path;
+      
+      const backendSelect = document.getElementById('editConverterBackend');
+      backendSelect.value = backend || 'sub.xeton.dev';
+      
       document.getElementById('editSubPathError').classList.remove('show');
       showModal('editSubscriptionModal');
     }
@@ -2710,6 +3932,7 @@ function invertSelection(subscriptionPath) {
       const originalPath = form.querySelector('[name="originalPath"]').value;
       const name = form.querySelector('[name="name"]').value.trim();
       const path = form.querySelector('[name="path"]').value.trim();
+      const converterBackend = document.getElementById('editConverterBackend').value;
       const errorEl = document.getElementById('editSubPathError');
       
       if (!name) {
@@ -2738,7 +3961,7 @@ function invertSelection(subscriptionPath) {
         const response = await fetch('/' + adminPath + '/api/subscriptions/' + originalPath, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ name, path, action: 'update_info' })
+          body: JSON.stringify({ name, path, converter_backend: converterBackend, action: 'update_info' })
         });
         
         const result = await response.json();
@@ -2779,7 +4002,12 @@ function invertSelection(subscriptionPath) {
     }
 
     // 页面加载完成后初始化
-    window.addEventListener('load', loadSubscriptions);
+    window.addEventListener('load', function() {
+      initTheme();
+      initLayout();
+      initConverterSelect();
+      loadSubscriptions();
+    });
   </script>
 </body>
 </html>`;
@@ -2807,11 +4035,9 @@ function createResponse(success, message, data = null, status = success ? 200 : 
   );
 }
 
-// 错误响应函数
 const createErrorResponse = (message, status = 500) => 
   createResponse(false, message, null, status);
 
-// 成功响应函数
 const createSuccessResponse = (data = null, message = '操作成功') => 
   createResponse(true, message, data);
 
@@ -2821,17 +4047,23 @@ async function handleGetSubscriptions(env) {
     SELECT 
       s.path,
       s.name,
+      s.sub_order,
+      s.updated_at,
+      s.converter_backend,
       COUNT(n.id) as nodeCount
     FROM subscriptions s
     LEFT JOIN nodes n ON s.id = n.subscription_id
     GROUP BY s.id
-    ORDER BY s.id ASC
+    ORDER BY COALESCE(s.sub_order, s.id) ASC
   `).all();
   
   const subscriptions = results.map(item => ({
     name: item.name,
     path: item.path,
-    nodeCount: item.nodeCount || 0
+    nodeCount: item.nodeCount || 0,
+    sub_order: item.sub_order || 0,
+    updated_at: item.updated_at || null,
+    converter_backend: item.converter_backend || 'sub.xeton.dev'
   }));
 
   return createSuccessResponse(subscriptions);
@@ -2873,6 +4105,7 @@ async function handleCreateNode(request, env, subscriptionPath) {
   
   const subscriptionId = subResults[0].id;
   let originalLink = nodeData.content.trim();
+  const now = Date.now();
   
   try {
     const decodedContent = safeBase64Decode(originalLink);
@@ -2889,12 +4122,17 @@ async function handleCreateNode(request, env, subscriptionPath) {
   }
   
   let nodeName = extractNodeName(originalLink);
-  const nodeOrder = nodeData.order;
+  const nodeOrder = nodeData.order || now;
 
-  await env.DB.prepare(`
-    INSERT INTO nodes (subscription_id, name, original_link, node_order, enabled) 
-    VALUES (?, ?, ?, ?, 1)
-  `).bind(subscriptionId, nodeName, originalLink, nodeOrder).run();
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO nodes (subscription_id, name, original_link, node_order, enabled) 
+      VALUES (?, ?, ?, ?, 1)
+    `).bind(subscriptionId, nodeName, originalLink, nodeOrder),
+    env.DB.prepare(
+      "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+    ).bind(now, subscriptionId)
+  ]);
 
   return createSuccessResponse(null, '节点创建成功');
 }
@@ -2902,6 +4140,18 @@ async function handleCreateNode(request, env, subscriptionPath) {
 // 删除节点的函数
 async function handleDeleteNode(env, subscriptionPath, nodeId) {
   try {
+    const now = Date.now();
+    
+    const { results: subResults } = await env.DB.prepare(
+      "SELECT id FROM subscriptions WHERE path = ?"
+    ).bind(subscriptionPath).all();
+    
+    if (subResults?.length) {
+      await env.DB.prepare(
+        "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+      ).bind(now, subResults[0].id).run();
+    }
+    
     await env.DB.prepare(`
       DELETE FROM nodes
       WHERE id = ? AND subscription_id = (
@@ -2922,6 +4172,18 @@ async function handleToggleNode(env, subscriptionPath, nodeId, request) {
     
     if (typeof enabled !== 'boolean') {
       return createErrorResponse('无效的状态值', 400);
+    }
+    
+    const now = Date.now();
+    
+    const { results: subResults } = await env.DB.prepare(
+      "SELECT id FROM subscriptions WHERE path = ?"
+    ).bind(subscriptionPath).all();
+    
+    if (subResults?.length) {
+      await env.DB.prepare(
+        "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+      ).bind(now, subResults[0].id).run();
     }
     
     const result = await env.DB.prepare(`
@@ -3143,6 +4405,7 @@ function parseSocksLink(socksLink) {
 async function handleUpdateSubscriptionInfo(env, path, data) {
   const name = data.name?.trim();
   const newPath = data.path?.trim();
+  const converterBackend = data.converter_backend || 'sub.xeton.dev';
 
   if (!name) {
     return createErrorResponse('订阅名称不能为空', 400);
@@ -3165,10 +4428,10 @@ async function handleUpdateSubscriptionInfo(env, path, data) {
 
     const statements = [
       env.DB.prepare(
-        "UPDATE subscriptions SET name = ?, path = ? WHERE path = ?"
-      ).bind(name, newPath, path),
+        "UPDATE subscriptions SET name = ?, path = ?, converter_backend = ? WHERE path = ?"
+      ).bind(name, newPath, converterBackend, path),
       env.DB.prepare(
-        "SELECT id, name, path FROM subscriptions WHERE path = ?"
+        "SELECT id, name, path, converter_backend FROM subscriptions WHERE path = ?"
       ).bind(newPath)
     ];
 
@@ -3214,6 +4477,7 @@ async function handleUpdateNode(request, env, subscriptionPath, nodeId) {
   
   const subscriptionId = subResults[0].id;
   let originalLink = nodeData.content.replace(/[\r\n\s]+$/, '');
+  const now = Date.now();
 
   try {
     const decodedContent = safeBase64Decode(originalLink);
@@ -3225,11 +4489,16 @@ async function handleUpdateNode(request, env, subscriptionPath, nodeId) {
 
   const nodeName = extractNodeName(originalLink);
 
-  await env.DB.prepare(`
-    UPDATE nodes 
-    SET original_link = ?, name = ? 
-    WHERE id = ? AND subscription_id = ?
-  `).bind(originalLink, nodeName || '未命名节点', nodeId, subscriptionId).run();
+  await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE nodes 
+      SET original_link = ?, name = ? 
+      WHERE id = ? AND subscription_id = ?
+    `).bind(originalLink, nodeName || '未命名节点', nodeId, subscriptionId),
+    env.DB.prepare(
+      "UPDATE subscriptions SET updated_at = ? WHERE id = ?"
+    ).bind(now, subscriptionId)
+  ]);
 
   return createSuccessResponse(null, '节点更新成功');
 }
@@ -4081,7 +5350,8 @@ function parseTuicToSurge(tuicLink) {
     if (reduceRtt === 'true' || reduceRtt === '1') configParts.push('reduce-rtt=true');
     
     return configParts.join(', ');
-  } catch (error) {
+  }
+  catch (error) {
     return null;
   }
 }
