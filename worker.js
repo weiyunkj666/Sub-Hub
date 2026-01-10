@@ -60,7 +60,7 @@ function extractNodeName(nodeLink) {
   return '未命名节点';
 }
 
-export 默认 {
+export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     const pathname = url.pathname;
@@ -70,9 +70,9 @@ export 默认 {
       return new Response('Not Found', { status: 404 });
     }
 
-    const adminPath = env.ADMIN_PATH || 'admin';
-    const adminUsername = env.ADMIN_USERNAME || 'admin';
-    const adminPassword = env.ADMIN_PASSWORD || 'pass';
+    const adminPath = env.ADMIN_PATH || 'weiyunkj';
+    const adminUsername = env.ADMIN_USERNAME || 'weiyunkj';
+    const adminPassword = env.ADMIN_PASSWORD || 'Gundan520.';
     
     // 处理登录页面请求
     if (pathname === `/${adminPath}/login`) {
@@ -5385,4 +5385,3 @@ function parseTuicToSurge(tuicLink) {
     return null;
   }
 }
-
