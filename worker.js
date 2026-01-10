@@ -70,9 +70,9 @@ export default {
       return new Response('Not Found', { status: 404 });
     }
 
-    const adminPath = env.ADMIN_PATH || 'admin';
-    const adminUsername = env.ADMIN_USERNAME || 'admin';
-    const adminPassword = env.ADMIN_PASSWORD || 'pass';
+    const adminPath = env.ADMIN_PATH || 'weiyunkj';
+    const adminUsername = env.ADMIN_USERNAME || 'weiyunkj';
+    const adminPassword = env.ADMIN_PASSWORD || 'Gundan520.';
     
     // 处理登录页面请求
     if (pathname === `/${adminPath}/login`) {
@@ -2836,6 +2836,35 @@ Base64编码格式
       });
     }
 
+
+
+    // 显示节点二维码
+    function showNodeQRCode(nodeLink, nodeName) {
+      const qrcodeImage = document.getElementById('qrcodeImage');
+      const qrcodeUrl = document.getElementById('qrcodeUrl');
+      
+      // 更新模态框标题显示节点名称
+      const displayName = nodeName.length > 30 ? nodeName.substring(0, 30) + '...' : nodeName;
+      document.querySelector('#qrcodeModal .modal-title').innerHTML = SVG_ICONS.qrcode + ' ' + displayName;
+      
+      // 生成二维码
+      const qrApiUrl = 'https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=' + encodeURIComponent(nodeLink);
+      qrcodeImage.src = qrApiUrl;
+      
+      // 显示链接（太长就截断）
+      qrcodeUrl.textContent = nodeLink.length > 80 ? nodeLink.substring(0, 80) + '...' : nodeLink;
+      
+      currentQRCodeUrl = nodeLink;
+      showModal('qrcodeModal');
+    }
+    
+    
+
+
+
+
+
+
     // 显示二维码
     function showQRCode(url) {
       currentQRCodeUrl = url;
@@ -3514,6 +3543,7 @@ Base64编码格式
                 <div class="node-actions">
                   <button class="btn btn-sm btn-icon" onclick="showEditNodeModal('\${subscriptionPath}', '\${node.id}', '\${escapedLink}')" title="编辑">\${SVG_ICONS.edit}</button>
                   <button class="btn btn-sm btn-icon" onclick="copyToClipboard('\${escapedLink}', this)" title="复制">\${SVG_ICONS.copy}</button>
+                  <button class="btn btn-sm btn-icon" onclick="showNodeQRCode('\${escapedLink}', '\${node.name.replace(/'/g, \"\\\\\\'\")}' )" title="二维码">\${SVG_ICONS.qrcode}</button>
                   <button class="btn btn-sm btn-icon btn-danger" onclick="deleteNode('\${subscriptionPath}', \${node.id})" title="删除">\${SVG_ICONS.trash}</button>
                 </div>
               </td>
@@ -5355,4 +5385,3 @@ function parseTuicToSurge(tuicLink) {
     return null;
   }
 }
-
