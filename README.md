@@ -93,7 +93,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 - `ADMIN_PATH`: 管理面板路径（默认：admin）
 - `ADMIN_USERNAME`: 管理员用户名（默认：admin）
-- `ADMIN_PASSWORD`: 管理员密码（默认：password）
+- `ADMIN_PASSWORD`: 管理员密码（默认：pass）
 
 
 
